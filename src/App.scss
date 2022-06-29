@@ -420,7 +420,8 @@ footer .content .copy {
   border-radius: 90px;
   font-size: 1.2rem;
   font-weight: 600;
-  transition: all .1s ease-in-out
+  transition: all .1s ease-in-out;
+  cursor: pointer;
 }
 
 .info-btn-wrap a:hover {

